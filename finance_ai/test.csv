@@ -1,0 +1,6 @@
+date,description,amount,category
+2026-03-01,Swiggy Order,-250,Food
+2026-03-02,Uber Ride,-180,Transport
+2026-03-03,Electricity Bill,-1200,Bills
+2026-03-04,Amazon Purchase,-999,Shopping
+2026-03-05,Salary,50000,Income
