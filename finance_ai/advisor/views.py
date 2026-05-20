@@ -323,7 +323,7 @@ def ca_chat(request):
 
         # 5. Try AI-powered response via DeepSeek
         history = conversation_manager.get_history(user_id)
-        ai_reply = call_ai_chat(history, max_tokens=1024)
+        ai_reply = call_ai_chat(history, max_tokens=4096)
 
         if ai_reply:
             reply = ai_reply

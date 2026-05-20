@@ -39,7 +39,7 @@ AI_API_KEY = os.environ.get("AI_API_KEY", "")
 MAX_RETRIES = 3
 RETRY_BACKOFF = 1.5          # seconds, multiplied each retry
 REQUEST_TIMEOUT = 45          # seconds (increased for richer responses)
-MAX_TOKENS = 1024             # increased for detailed financial advice
+MAX_TOKENS = 4096             # increased to support reasoning models (thinking + response)
 
 # ================================
 # LOGGING
