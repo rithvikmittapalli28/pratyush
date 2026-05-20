@@ -32,7 +32,7 @@ load_dotenv()
 # CONFIGURATION (from environment)
 # ================================
 AI_BASE_URL = os.environ.get("AI_BASE_URL", "https://api.aicredits.in/v1")
-AI_MODEL = os.environ.get("AI_MODEL", "deepseek/deepseek-v4-pro")
+AI_MODEL = os.environ.get("AI_MODEL", "deepseek/deepseek-chat")
 AI_API_KEY = os.environ.get("AI_API_KEY", "")
 
 # Retry & timeout settings
