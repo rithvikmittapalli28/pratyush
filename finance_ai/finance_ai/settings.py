@@ -19,7 +19,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # AI CONFIGURATION (DeepSeek V4 Pro)
 # ================================
 AI_BASE_URL = os.environ.get("AI_BASE_URL", "https://api.aicredits.in/v1")
-AI_MODEL = os.environ.get("AI_MODEL", "deepseek-v4-pro")
+AI_MODEL = os.environ.get("AI_MODEL", "deepseek/deepseek-v4-pro")
 AI_API_KEY = os.environ.get("AI_API_KEY", "")
 
 
