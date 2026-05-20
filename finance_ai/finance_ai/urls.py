@@ -18,6 +18,7 @@ from advisor.views import (
     signup,
     login
 )
+from rest_framework_simplejwt.views import TokenRefreshView
 
 
 urlpatterns = [
@@ -32,6 +33,7 @@ urlpatterns = [
     path('signup/', signup),
     path('login/', login),
     path('me/', get_me),
+    path('token/refresh/', TokenRefreshView.as_view()),
     path('advisor/', include('advisor.urls')),
 
     # -------------------------------
