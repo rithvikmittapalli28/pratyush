@@ -1,5 +1,9 @@
 from django.contrib import admin
 from django.urls import include, path
+from django.http import JsonResponse
+
+def ping(request):
+    return JsonResponse({"status": "ok"})
 
 # Transaction APIs
 from transactions.views import (
@@ -26,6 +30,7 @@ urlpatterns = [
     # Admin
     # -------------------------------
     path('admin/', admin.site.urls),
+    path('ping/', ping),
 
     # -------------------------------
     # Authentication
