@@ -5,6 +5,18 @@ from django.http import JsonResponse
 def ping(request):
     return JsonResponse({"status": "ok"})
 
+def debug(request):
+    from ai_engine.ai_service import AI_MODEL, REQUEST_TIMEOUT, MAX_RETRIES
+    from ai_engine.market_service import _cache, _refresh_thread
+    return JsonResponse({
+        "ai_model": AI_MODEL,
+        "request_timeout": REQUEST_TIMEOUT,
+        "max_retries": MAX_RETRIES,
+        "market_cache_keys": list(_cache.get("data", {}).keys()) if _cache.get("data") else None,
+        "market_thread_alive": _refresh_thread.is_alive() if _refresh_thread else False,
+        "version": "lazy_thread_v3"
+    })
+
 # Transaction APIs
 from transactions.views import (
     upload_csv,
@@ -31,6 +43,7 @@ urlpatterns = [
     # -------------------------------
     path('admin/', admin.site.urls),
     path('ping/', ping),
+    path('debug/', debug),
 
     # -------------------------------
     # Authentication
