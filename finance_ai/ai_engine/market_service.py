@@ -37,8 +37,8 @@ MARKET_API_BASE = os.environ.get(
 _CACHE_TTL = 300
 _cache = {"data": None, "timestamp": 0}
 
-# Request timeout
-_TIMEOUT = 15
+# Request timeout (keep low — Render has 30s total limit)
+_TIMEOUT = 5
 
 
 # ================================

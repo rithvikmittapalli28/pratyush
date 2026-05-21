@@ -36,10 +36,12 @@ AI_MODEL = os.environ.get("AI_MODEL", "deepseek/deepseek-chat")
 AI_API_KEY = os.environ.get("AI_API_KEY", "")
 
 # Retry & timeout settings
-MAX_RETRIES = 3
-RETRY_BACKOFF = 1.5          # seconds, multiplied each retry
-REQUEST_TIMEOUT = 45          # seconds (increased for richer responses)
-MAX_TOKENS = 800              # balanced for fast response + quality financial advice
+# NOTE: Render free tier has a 30-second HTTP request timeout.
+# Market fetch (~3s) + AI call (~15s) must fit within that window.
+MAX_RETRIES = 1               # no retries — single attempt to stay under 30s
+RETRY_BACKOFF = 1.0           # seconds (unused with 1 retry)
+REQUEST_TIMEOUT = 20          # seconds — leaves room for market fetch + overhead
+MAX_TOKENS = 600              # concise but detailed financial advice
 
 # ================================
 # LOGGING
