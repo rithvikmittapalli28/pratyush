@@ -82,38 +82,29 @@ def _api_get(endpoint, params=None):
 
 
 # ================================
-# LIVE MARKET DATA FETCHER
+# LIVE MARKET DATA FETCHER (BACKGROUND THREAD)
 # ================================
-def _fetch_live_market_data():
+def _do_fetch():
     """
-    Fetch live market data from IndianAPI.
-    Returns a dict with trending stocks, market overview, etc.
-    Uses caching to avoid excessive API calls.
+    Internal: actually fetch market data from IndianAPI.
+    Called only by the background refresh thread.
     """
     if not MARKET_API_KEY:
         return None
-
-    # Check cache
-    now = datetime.now().timestamp()
-    if _cache["data"] and (now - _cache["timestamp"]) < _CACHE_TTL:
-        return _cache["data"]
 
     results = {}
 
     # ---- 1. Trending stocks (top gainers & losers) ----
     trending = _api_get("/trending")
     if trending:
-        # Extract top gainers
         gainers = trending.get("top_gainers", [])
         if isinstance(gainers, list) and gainers:
-            results["top_gainers"] = gainers[:5]  # Top 5
+            results["top_gainers"] = gainers[:5]
 
-        # Extract top losers
         losers = trending.get("top_losers", [])
         if isinstance(losers, list) and losers:
-            results["top_losers"] = losers[:5]  # Top 5
+            results["top_losers"] = losers[:5]
 
-        # Extract trending stocks
         trending_list = trending.get("trending_stocks", trending.get("trending", []))
         if isinstance(trending_list, list) and trending_list:
             results["trending"] = trending_list[:5]
@@ -132,11 +123,44 @@ def _fetch_live_market_data():
                 if item.get("title")
             ]
 
-    if results:
-        _cache["data"] = results
-        _cache["timestamp"] = now
-
     return results if results else None
+
+
+def _background_refresh():
+    """
+    Background thread: fetch market data immediately on startup,
+    then refresh every _CACHE_TTL seconds.
+    This keeps the cache warm so chat requests NEVER block on market I/O.
+    """
+    import time as _time
+
+    while True:
+        try:
+            data = _do_fetch()
+            if data:
+                _cache["data"] = data
+                _cache["timestamp"] = datetime.now().timestamp()
+                logger.info("Market data cache refreshed (%d keys)", len(data))
+            else:
+                logger.info("Market data fetch returned nothing (API down or no key)")
+        except Exception as exc:
+            logger.error("Background market fetch error: %s", exc)
+
+        _time.sleep(_CACHE_TTL)
+
+
+def _fetch_live_market_data():
+    """
+    Returns cached market data (instant, no network I/O).
+    The background thread keeps the cache warm.
+    """
+    return _cache.get("data")
+
+
+# Start the background refresh thread on module import
+import threading
+_refresh_thread = threading.Thread(target=_background_refresh, daemon=True)
+_refresh_thread.start()
 
 
 # ================================
