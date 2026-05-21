@@ -1,1 +1,1 @@
-web: gunicorn finance_ai.wsgi
+web: gunicorn finance_ai.wsgi --timeout 120
