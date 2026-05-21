@@ -17,6 +17,7 @@ Usage:
 import os
 import logging
 import requests
+import threading
 from datetime import datetime
 
 from dotenv import load_dotenv
@@ -149,18 +150,31 @@ def _background_refresh():
         _time.sleep(_CACHE_TTL)
 
 
+_refresh_thread = None
+_thread_lock = threading.Lock()
+
+
+def ensure_background_refresh_started():
+    """
+    Lazily start the background refresh thread if it hasn't started yet.
+    Avoids starting threads at module import time which can deadlock WSGI servers.
+    """
+    global _refresh_thread
+    if _refresh_thread is None:
+        with _thread_lock:
+            if _refresh_thread is None:
+                logger.info("Starting background market refresh thread (lazy initialization)")
+                _refresh_thread = threading.Thread(target=_background_refresh, daemon=True)
+                _refresh_thread.start()
+
+
 def _fetch_live_market_data():
     """
     Returns cached market data (instant, no network I/O).
     The background thread keeps the cache warm.
     """
+    ensure_background_refresh_started()
     return _cache.get("data")
-
-
-# Start the background refresh thread on module import
-import threading
-_refresh_thread = threading.Thread(target=_background_refresh, daemon=True)
-_refresh_thread.start()
 
 
 # ================================
