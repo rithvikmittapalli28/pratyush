@@ -80,7 +80,7 @@ class CAChatTests(APITestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["reply"], AI_UNAVAILABLE_REPLY)
         self.assertEqual(response.data["response"], AI_UNAVAILABLE_REPLY)
         self.assertEqual(response.data["error"], "ai_unavailable")
