@@ -1,25 +1,30 @@
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+import logging
+import traceback
 
-from django.contrib.auth.models import User
 from django.contrib.auth import authenticate
+from django.contrib.auth.models import User
+from django.db.models import Sum
+from django.utils import timezone
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from transactions.services import get_dashboard_data
+from advisor.conversation import conversation_manager
 from ai_engine.ai_service import call_ai_chat
 from ai_engine.market_service import get_market_context
-from advisor.conversation import conversation_manager
-
-import logging
+from transactions.models import Budget, Transaction
+from transactions.services import get_dashboard_data
 
 logger = logging.getLogger("advisor")
+
+AI_UNAVAILABLE_REPLY = "AI advisor is temporarily unavailable. Please try again."
 
 
 # -------------------------------
 # SIGNUP
 # -------------------------------
-@api_view(['POST'])
+@api_view(["POST"])
 @permission_classes([])
 def signup(request):
     username = request.data.get("username")
@@ -38,7 +43,7 @@ def signup(request):
 # -------------------------------
 # LOGIN
 # -------------------------------
-@api_view(['POST'])
+@api_view(["POST"])
 @permission_classes([])
 def login(request):
     username = request.data.get("username")
@@ -53,7 +58,7 @@ def login(request):
 
     return Response({
         "access": str(refresh.access_token),
-        "refresh": str(refresh)
+        "refresh": str(refresh),
     })
 
 
@@ -72,292 +77,216 @@ def get_me(request):
 
 
 # -------------------------------
-# INTENT DETECTION (EXPANDED)
-# -------------------------------
-def detect_intent(msg: str):
-    """
-    Detect user intent from message text.
-    Expanded beyond the original 3 intents to cover investment,
-    budgeting, income, tax, and general financial queries.
-    """
-    msg = msg.lower()
-
-    if any(w in msg for w in ["runway", "how long", "last", "survive", "days left"]):
-        return "runway"
-
-    if any(w in msg for w in ["overspend", "overspending", "too much", "where am i overspending"]):
-        return "overspending"
-
-    if any(w in msg for w in ["cut", "reduce", "improve savings", "what should i cut"]):
-        return "savings"
-
-    if any(w in msg for w in [
-        "invest", "investment", "returns", "stock", "mutual fund",
-        "gold", "silver", "sip", "nifty", "sensex", "share",
-        "portfolio", "fd", "fixed deposit", "ppf", "nps",
-        "where should i put", "better returns", "grow my money"
-    ]):
-        return "invest"
-
-    if any(w in msg for w in ["budget", "allocat", "50 30 20", "split", "divide income"]):
-        return "budget"
-
-    if any(w in msg for w in ["income", "salary", "earn", "earning"]):
-        return "income"
-
-    if any(w in msg for w in ["tax", "80c", "elss", "deduction", "itr"]):
-        return "tax"
-
-    if any(w in msg for w in ["emergency", "insurance", "protect", "safety net"]):
-        return "safety"
-
-    if any(w in msg for w in ["save", "saving"]):
-        return "savings"
-
-    if any(w in msg for w in ["spend", "spending", "where money", "breakdown", "expense"]):
-        return "spending"
-
-    # General financial questions get a helpful response
-    return "general"
-
-
-# -------------------------------
 # BUILD FINANCIAL CONTEXT FOR AI
 # -------------------------------
-def _build_system_prompt(data):
+def _format_money(value):
+    try:
+        return f"Rs {float(value):,.0f}"
+    except (TypeError, ValueError):
+        return "Rs 0"
+
+
+def _get_monthly_snapshot(user):
+    today = timezone.localdate()
+    month_txs = Transaction.objects.filter(
+        user=user,
+        date__year=today.year,
+        date__month=today.month,
+    )
+    month_expenses = month_txs.filter(amount__lt=0)
+
+    category_rows = month_expenses.values("category").annotate(total=Sum("amount"))
+    monthly_categories = {
+        row["category"] or "Other": abs(row["total"] or 0)
+        for row in category_rows
+    }
+
+    monthly_income = month_txs.filter(amount__gt=0).aggregate(total=Sum("amount"))["total"] or 0
+    monthly_spending = sum(monthly_categories.values())
+
+    return {
+        "month": today.strftime("%B %Y"),
+        "income": monthly_income,
+        "spending": monthly_spending,
+        "categories": monthly_categories,
+    }
+
+
+def _get_budget_snapshot(user):
+    budgets = Budget.objects.filter(user=user).order_by("category")
+    return {budget.category: budget.limit for budget in budgets}
+
+
+def _get_recent_transactions(user, limit=12):
+    transactions = Transaction.objects.filter(user=user).order_by("-date", "-id")[:limit]
+    return [
+        {
+            "date": tx.date.isoformat(),
+            "merchant": tx.merchant,
+            "category": tx.category or "Other",
+            "amount": tx.amount,
+        }
+        for tx in transactions
+    ]
+
+
+def _format_mapping(mapping, empty_message):
+    if not mapping:
+        return f"  - {empty_message}"
+
+    return "\n".join(
+        f"  - {key}: {_format_money(value)}"
+        for key, value in sorted(mapping.items(), key=lambda item: item[1], reverse=True)
+    )
+
+
+def _format_recent_transactions(transactions):
+    if not transactions:
+        return "  - No uploaded or manually added transactions yet."
+
+    lines = []
+    for tx in transactions:
+        direction = "income" if tx["amount"] > 0 else "expense"
+        lines.append(
+            f"  - {tx['date']} | {tx['merchant']} | {tx['category']} | "
+            f"{_format_money(abs(tx['amount']))} {direction}"
+        )
+    return "\n".join(lines)
+
+
+def _build_system_prompt(user, data):
     """
-    Build a comprehensive system prompt that gives the AI full financial
-    context AND market awareness so it can provide personalized,
-    data-driven responses for any financial question.
+    Build the system prompt on every request so new uploads, budgets, and
+    spending changes are immediately available to the LLM.
     """
     forecast = data.get("forecast", {})
-    category = data.get("category_breakdown", {})
+    lifetime_categories = data.get("category_breakdown", {})
     total_spent = data.get("total_spent", 0)
     runway = forecast.get("runway_days", 0)
     remaining = forecast.get("remaining_balance", 0)
-
-    # Format category breakdown for the AI
-    cat_lines = "\n".join(
-        f"  - {cat}: Rs {amt}" for cat, amt in category.items()
-    ) if category else "  No spending data yet."
-
-    # Get market context (live data if API key is set, else general knowledge)
+    monthly = _get_monthly_snapshot(user)
+    budgets = _get_budget_snapshot(user)
+    recent_transactions = _get_recent_transactions(user)
     market_context = get_market_context()
 
-    return f"""You are "Finance AI" — a smart, expert-level personal finance assistant and investment advisor.
-You help users with ALL aspects of personal finance: spending analysis, budgeting, saving strategies,
-investment advice, tax planning, insurance, retirement planning, and wealth building.
+    return f"""You are Finance AI, a conversational personal finance assistant for Indian users.
+Respond like a smart, practical finance advisor: warm, concise, specific, and willing to reason through tradeoffs.
+
+You can answer any money-related question, including budgeting, spending analysis, saving strategies, debt, taxes,
+insurance, financial planning, mutual funds, stocks, crypto, gold, fixed deposits, PPF, NPS, and market trends.
+Do not use keyword routing or canned answers. Treat every user message as a fresh conversational request.
 
 CURRENT USER FINANCIAL DATA:
-- Total spent: Rs {total_spent}
-- Remaining balance: Rs {remaining}
+- Lifetime uploaded/manual spending: {_format_money(total_spent)}
+- Remaining balance from known transactions: {_format_money(remaining)}
 - Runway (days until funds run out): {runway} days
-- Spending by category:
-{cat_lines}
+- Current month: {monthly["month"]}
+- Current-month income: {_format_money(monthly["income"])}
+- Current-month spending: {_format_money(monthly["spending"])}
+- Current-month spending by category:
+{_format_mapping(monthly["categories"], "No current-month spending data yet.")}
+- Overall spending by category:
+{_format_mapping(lifetime_categories, "No spending data yet.")}
+- User budgets:
+{_format_mapping(budgets, "No budgets set yet.")}
+- Recent transactions:
+{_format_recent_transactions(recent_transactions)}
 
 {market_context}
 
-CORE RULES:
-- Always use the real user financial data above — never fabricate numbers about their spending.
-- Use INR (Rs) for all currency amounts.
-- Be actionable: give specific, numbered steps when possible.
-- Be encouraging but honest about spending habits and investment risks.
-- Use bullet points and clear formatting for readability.
-- Keep responses focused and useful (3-8 sentences for simple questions, longer for complex analysis).
-
-SPENDING & SAVINGS QUESTIONS:
-- Reference their actual spending categories and amounts.
-- Suggest specific categories to cut and by how much.
-- Calculate potential savings with concrete numbers.
-
-INVESTMENT QUESTIONS:
-- Provide asset allocation suggestions based on their spending patterns and remaining balance.
-- Cover relevant asset classes: Gold, Silver, Mutual Funds (SIPs), Index Funds, Fixed Deposits, PPF, NPS, Stocks.
-- Always mention risk levels (low/medium/high) for each suggestion.
-- Recommend an emergency fund (3-6 months of expenses) before aggressive investing.
-- For Indian investors, mention tax-saving options (ELSS, PPF, NPS under 80C) when relevant.
-- If you don't have live market data, give directional advice based on general market principles.
-- Always add a disclaimer to consult a certified financial advisor for large investment decisions.
-
-BUDGETING QUESTIONS:
-- Suggest the 50/30/20 rule or similar frameworks adapted to their data.
-- Calculate ideal budget splits based on their income if available.
-
-SCOPE:
-- Answer ANY finance, money, or investment related question.
-- For non-financial questions, politely redirect: "I specialize in financial advice. Can I help you with your spending, investments, or budgeting instead?"
+RESPONSE RULES:
+- Use the real financial data above when relevant. If data is missing, say what is missing and answer generally.
+- Use INR and "Rs" for currency amounts.
+- Keep simple answers concise; use clear bullets or numbered steps for planning questions.
+- Explain risk levels for investments and crypto. Never guarantee profits or returns.
+- Before aggressive investing, check emergency fund, debt, runway, monthly spending, and diversification.
+- If discussing current market timing, be balanced: valuation, risk, time horizon, liquidity, and staged investing.
+- For tax questions, give general education and recommend a qualified CA for personal tax decisions.
+- For large or regulated investment decisions, suggest consulting a SEBI-registered investment advisor.
+- If the question is not about finance, politely redirect to finance topics.
 """
 
 
-# -------------------------------
-# RULE-BASED FALLBACK RESPONSE
-# -------------------------------
-def _get_rule_based_reply(intent, data):
-    """
-    Expanded rule-based fallback responses when DeepSeek is unavailable.
-    Covers all detected intents with helpful, data-driven answers.
-    """
-    forecast = data.get("forecast", {})
-    category = data.get("category_breakdown", {})
-    total_spent = data.get("total_spent", 0)
-    remaining = forecast.get("remaining_balance", 0)
-
-    if intent == "runway":
-        runway = forecast.get("runway_days", 0)
-        return f"At your current spending rate, your money will last approximately **{runway} days**. Consider reducing your highest expense categories to extend this."
-
-    elif intent == "overspending":
-        if category:
-            top = max(category, key=category.get)
-            amount = category[top]
-            return f"You're spending the most on **{top}** (Rs {amount}), which is your biggest expense area. Try setting a budget cap for this category."
-        return "I couldn't find enough data to detect overspending yet. Upload your transactions to get started!"
-
-    elif intent == "savings":
-        if category:
-            top = max(category, key=category.get)
-            amount = category[top]
-            potential = round(amount * 0.2)
-            return f"To improve savings, start by reducing **{top}** (currently Rs {amount}). A 20% cut could save you Rs {potential}/month. That's the highest-impact change."
-        return "I need more spending data before suggesting savings improvements. Upload your transactions first!"
-
-    elif intent == "spending":
-        if category:
-            breakdown = ", ".join(f"{cat}: Rs {amt}" for cat, amt in sorted(category.items(), key=lambda x: x[1], reverse=True))
-            return f"You've spent a total of **Rs {total_spent}** so far. Breakdown: {breakdown}."
-        return f"You have spent a total of Rs {total_spent} so far across all categories."
-
-    elif intent == "invest":
-        if remaining > 0:
-            emergency_fund = round(total_spent * 0.5) if total_spent > 0 else 5000
-            return (
-                f"With Rs {remaining} remaining balance, here's a starting plan:\n"
-                f"• **Emergency Fund**: Keep Rs {emergency_fund} in a savings account (3-6 months of expenses)\n"
-                f"• **SIP in Index Funds**: Start with Rs {round(remaining * 0.3)} in Nifty 50 index fund\n"
-                f"• **Gold/Silver**: Allocate 5-10% as a hedge\n"
-                f"• **PPF/FD**: For guaranteed returns\n"
-                f"_Note: This is general guidance. Please consult a financial advisor for personalized advice._"
-            )
-        return "Build up some savings first by reducing expenses, then we can discuss investment strategies! Check your spending breakdown to find areas to cut."
-
-    elif intent == "budget":
-        if total_spent > 0:
-            return (
-                f"Based on your spending of Rs {total_spent}, try the **50/30/20 rule**:\n"
-                f"• **50% Needs**: Bills, rent, groceries\n"
-                f"• **30% Wants**: Shopping, entertainment, dining out\n"
-                f"• **20% Savings/Investment**: Emergency fund, SIPs, FDs"
-            )
-        return "Upload your transactions first, and I'll create a personalized budget plan for you!"
-
-    elif intent == "income":
-        return "I can see your spending data. To give better income-based advice, try asking about budget allocation or where to invest your surplus."
-
-    elif intent == "tax":
-        return (
-            "For tax savings under Section 80C (up to Rs 1.5 lakh), consider:\n"
-            "• **ELSS Mutual Funds**: Best returns with 3-year lock-in\n"
-            "• **PPF**: Safe, 15-year tenure, tax-free returns\n"
-            "• **NPS**: Additional Rs 50,000 deduction under 80CCD(1B)\n"
-            "_Consult a CA for personalized tax planning._"
-        )
-
-    elif intent == "safety":
-        monthly_expense = round(total_spent / 6) if total_spent > 0 else 0
-        target = monthly_expense * 6
-        return (
-            f"An emergency fund should cover 3-6 months of expenses. "
-            f"Based on your data, aim for **Rs {target}** in a liquid savings account. "
-            f"Also consider term life insurance and health insurance if you haven't already."
-        )
-
-    # General — friendly, helpful response
-    return (
-        "I'm your AI financial advisor! I can help you with:\n"
-        "• **Spending analysis** — where is your money going?\n"
-        "• **Investment advice** — where to invest for better returns\n"
-        "• **Budgeting** — how to split your income smartly\n"
-        "• **Savings** — how to save more each month\n"
-        "• **Tax planning** — maximize your deductions\n"
-        "Try asking something like _\"Where should I invest?\"_ or _\"How can I reduce spending?\"_"
-    )
+def _response_payload(reply, **extra):
+    # "response" is kept as a compatibility alias for older frontends.
+    return {"reply": reply, "response": reply, **extra}
 
 
 # -------------------------------
 # CA CHAT (SECURED + AI-POWERED)
 # -------------------------------
-@api_view(['POST'])
+@api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def ca_chat(request):
     """
-    AI-powered conversational assistant with multi-turn history.
-    Uses DeepSeek V4 Pro for intelligent responses with full financial context.
-    Falls back to rule-based responses if the AI service is unavailable.
+    Fully conversational finance assistant.
+    Every normal user message is sent to the configured LLM with fresh
+    financial context and conversation history.
     """
     try:
         message = request.data.get("message", "").strip()
 
         if not message:
-            return Response({"reply": "Please ask a valid question."})
+            return Response(_response_payload("Please ask a valid question."), status=400)
 
         user = request.user
         user_id = user.id
 
-        # Handle special commands
         if message.lower() in ["clear", "reset", "new chat"]:
             conversation_manager.clear(user_id)
-            return Response({"reply": "Conversation history cleared. How can I help you?"})
+            reply = "Conversation history cleared. How can I help you?"
+            return Response(_response_payload(reply))
 
-        # 1. Gather financial data
         data = get_dashboard_data(user)
+        system_prompt = _build_system_prompt(user, data)
 
-        # 2. Build system prompt with real financial + market context
-        system_prompt = _build_system_prompt(data)
-
-        # 3. Initialize conversation if first message
-        if not conversation_manager.has_history(user_id):
-            conversation_manager.add_message(user_id, "system", system_prompt)
-
-        # 4. Add user message to history
         conversation_manager.add_message(user_id, "user", message)
+        conversation_history = [
+            item
+            for item in conversation_manager.get_history(user_id)
+            if item.get("role") in {"user", "assistant"}
+        ]
+        llm_messages = [{"role": "system", "content": system_prompt}] + conversation_history
 
-        # 5. Try AI-powered response via DeepSeek
-        history = conversation_manager.get_history(user_id)
-        ai_reply = call_ai_chat(history, max_tokens=600)
+        logger.info(
+            "CA_CHAT user=%s  prompt=%r  history_len=%d",
+            user_id, message[:120], len(conversation_history),
+        )
 
-        if ai_reply:
-            reply = ai_reply
-            # Save assistant response to history for multi-turn
-            conversation_manager.add_message(user_id, "assistant", reply)
-        else:
-            # Fallback to rule-based response
-            logger.warning("DeepSeek unavailable for user %s, using rule-based fallback", user_id)
-            intent = detect_intent(message)
-            reply = _get_rule_based_reply(intent, data)
+        ai_reply = call_ai_chat(llm_messages, max_tokens=700)
 
-        # SAFETY (NEVER EMPTY)
-        if not reply:
-            reply = "Something went wrong while generating a response."
+        if not ai_reply or not ai_reply.strip():
+            logger.warning("AI returned empty for user %s — returning fallback", user_id)
+            return Response(
+                _response_payload(AI_UNAVAILABLE_REPLY, error="ai_unavailable"),
+                status=200,  # 200 so axios doesn't throw; frontend checks 'error' flag
+            )
+
+        reply = ai_reply.strip()
+        conversation_manager.add_message(user_id, "assistant", reply)
 
         logger.debug("CA reply for user %s: %s", user_id, reply[:100])
+        return Response(_response_payload(reply))
 
-        return Response({
-            "reply": reply
-        })
-
-    except Exception as e:
-        logger.error("ERROR IN CA_CHAT: %s", str(e), exc_info=True)
-        return Response({
-            "reply": "Something went wrong on the server."
-        })
+    except Exception as exc:
+        logger.error(
+            "ERROR IN CA_CHAT for user %s: %s\n%s",
+            request.user.id if hasattr(request, 'user') else '?',
+            str(exc),
+            traceback.format_exc(),
+        )
+        return Response(
+            _response_payload(AI_UNAVAILABLE_REPLY, error="server_error"),
+            status=200,  # 200 so frontend can read the message body
+        )
 
 
 # -------------------------------
 # CLEAR CHAT HISTORY
 # -------------------------------
-@api_view(['POST'])
+@api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def clear_chat(request):
     """Clear conversation history for the current user."""
     conversation_manager.clear(request.user.id)
-    return Response({"message": "Chat history cleared."})
+    return Response({"message": "Chat history cleared."})

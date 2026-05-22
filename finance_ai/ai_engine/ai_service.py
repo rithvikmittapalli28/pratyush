@@ -21,12 +21,16 @@ Usage:
 import os
 import time
 import logging
+import traceback
+from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
 
-# Load .env from project root
-load_dotenv()
+# Load .env from the Django project root (finance_ai/finance_ai/.env)
+# This ensures the key loads regardless of the CWD used by gunicorn/Render.
+_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(_ENV_PATH)
 
 # ================================
 # CONFIGURATION (from environment)
@@ -37,10 +41,10 @@ AI_API_KEY = os.environ.get("AI_API_KEY", "")
 
 # Retry & timeout settings
 # NOTE: Render free tier has a 30-second HTTP request timeout.
-# Market fetch (~3s) + AI call (~15s) must fit within that window.
-MAX_RETRIES = 1               # no retries — single attempt to stay under 30s
-RETRY_BACKOFF = 1.0           # seconds (unused with 1 retry)
-REQUEST_TIMEOUT = 20          # seconds — leaves room for market fetch + overhead
+# Market fetch uses a background cache (instant), so the full 30s is available.
+MAX_RETRIES = 2               # one real retry for transient 429/500/timeout
+RETRY_BACKOFF = 1.0           # seconds between retries
+REQUEST_TIMEOUT = 25          # seconds — generous for cold LLM providers
 MAX_TOKENS = 600              # concise but detailed financial advice
 
 # ================================
@@ -57,6 +61,21 @@ if not logger.handlers:
     )
     logger.addHandler(_handler)
 
+# ================================
+# STARTUP VALIDATION
+# ================================
+if not AI_API_KEY:
+    logger.critical(
+        "AI_API_KEY is NOT set. The AI chatbot will return empty responses. "
+        "Set AI_API_KEY in the environment or .env file at: %s",
+        _ENV_PATH,
+    )
+else:
+    logger.info(
+        "AI service configured: model=%s  base_url=%s  key=sk-...%s",
+        AI_MODEL, AI_BASE_URL, AI_API_KEY[-6:],
+    )
+
 
 # ================================
 # INTERNAL: HTTP CALL WITH RETRIES
@@ -71,7 +90,10 @@ def _call_completions(messages, temperature=0.3, max_tokens=MAX_TOKENS):
     """
 
     if not AI_API_KEY:
-        logger.warning("AI_API_KEY is not set — skipping AI call")
+        logger.error(
+            "AI_API_KEY is not set — cannot call AI. "
+            "Set it in Render env vars or .env at: %s", _ENV_PATH
+        )
         return None
 
     url = f"{AI_BASE_URL.rstrip('/')}/chat/completions"
@@ -93,9 +115,12 @@ def _call_completions(messages, temperature=0.3, max_tokens=MAX_TOKENS):
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            logger.debug(
-                "AI request attempt %d/%d  model=%s  messages=%d",
-                attempt, MAX_RETRIES, AI_MODEL, len(messages),
+            # Log the user prompt (last user message, truncated) for debugging
+            user_msgs = [m for m in messages if m.get("role") == "user"]
+            last_prompt = user_msgs[-1]["content"][:120] if user_msgs else "(none)"
+            logger.info(
+                "AI request attempt %d/%d  model=%s  messages=%d  prompt=%r",
+                attempt, MAX_RETRIES, AI_MODEL, len(messages), last_prompt,
             )
 
             res = requests.post(
@@ -124,7 +149,7 @@ def _call_completions(messages, temperature=0.3, max_tokens=MAX_TOKENS):
 
             if res.status_code != 200:
                 logger.error(
-                    "AI API error %d: %s", res.status_code, res.text[:300]
+                    "AI API error %d: %s", res.status_code, res.text[:500]
                 )
                 return None
 
@@ -133,11 +158,11 @@ def _call_completions(messages, temperature=0.3, max_tokens=MAX_TOKENS):
             choices = data.get("choices", [])
 
             if not choices:
-                logger.error("AI API returned empty choices: %s", data)
+                logger.error("AI API returned empty choices. Full response: %s", data)
                 return None
 
             content = choices[0].get("message", {}).get("content", "").strip()
-            logger.debug("AI response received (%d chars)", len(content))
+            logger.info("AI response received (%d chars): %r", len(content), content[:150])
             return content
 
         except requests.exceptions.Timeout:
@@ -153,7 +178,9 @@ def _call_completions(messages, temperature=0.3, max_tokens=MAX_TOKENS):
             time.sleep(wait)
 
         except Exception as exc:
-            logger.error("Unexpected AI error: %s", exc, exc_info=True)
+            logger.error(
+                "Unexpected AI error: %s\n%s", exc, traceback.format_exc()
+            )
             return None
 
     logger.error("All %d AI attempts failed. Last error: %s", MAX_RETRIES, last_error)
