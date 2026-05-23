@@ -1,78 +1,58 @@
 """
-Conversation Manager — Session history for CA (Conversational Assistant)
+Conversation Manager — Persistence via SQLite/PostgreSQL Database
 ========================================================================
-Thread-safe, in-memory conversation history keyed by user ID.
-Designed for multi-turn chat with DeepSeek / any LLM.
-
-Usage:
-    from advisor.conversation import conversation_manager
-
-    conversation_manager.add_message(user_id=1, role="user", content="Hi")
-    history = conversation_manager.get_history(user_id=1)
-    conversation_manager.clear(user_id=1)
+Keyed by user ID. Thread-safe database operations.
 """
 
-import threading
-from collections import defaultdict
+from advisor.models import ChatMessage
 
-# Maximum messages per user (system + user + assistant turns)
 MAX_HISTORY = 20
 
 
 class ConversationManager:
     """
-    In-memory conversation history manager.
-    Thread-safe via a simple lock.
+    Database-backed conversation history manager.
     """
-
-    def __init__(self, max_history=MAX_HISTORY):
-        self._history = defaultdict(list)
-        self._lock = threading.Lock()
-        self._max_history = max_history
 
     def add_message(self, user_id, role, content):
         """
-        Append a message to the user's conversation history.
-
-        Args:
-            user_id:  int — Django User.id
-            role:     str — "system", "user", or "assistant"
-            content:  str — message text
+        Append a message to the user's conversation history in the database.
+        System messages are NOT stored in the database (they are generated dynamically on every request).
         """
-        with self._lock:
-            history = self._history[user_id]
-            history.append({"role": role, "content": content})
+        if role not in {"user", "assistant"}:
+            return
 
-            # Trim oldest non-system messages if over limit
-            if len(history) > self._max_history:
-                # Keep system messages, trim the rest
-                system_msgs = [m for m in history if m["role"] == "system"]
-                other_msgs = [m for m in history if m["role"] != "system"]
+        ChatMessage.objects.create(
+            user_id=user_id,
+            role=role,
+            content=content
+        )
 
-                # Keep only the latest messages
-                keep_count = self._max_history - len(system_msgs)
-                trimmed = system_msgs + other_msgs[-keep_count:]
-                self._history[user_id] = trimmed
+        # Trim old messages if over limit
+        count = ChatMessage.objects.filter(user_id=user_id).count()
+        if count > MAX_HISTORY:
+            excess = count - MAX_HISTORY
+            # Find the primary keys of the oldest items
+            old_ids = ChatMessage.objects.filter(user_id=user_id).order_by("created_at")[:excess].values_list("id", flat=True)
+            ChatMessage.objects.filter(id__in=list(old_ids)).delete()
 
     def get_history(self, user_id):
         """
-        Get the full conversation history for a user.
-
-        Returns:
-            list of dicts — [{"role": "...", "content": "..."}, ...]
+        Get the full conversation history for a user from the database.
         """
-        with self._lock:
-            return list(self._history.get(user_id, []))
+        messages = ChatMessage.objects.filter(user_id=user_id).order_by("created_at")
+        return [
+            {"role": msg.role, "content": msg.content}
+            for msg in messages
+        ]
 
     def clear(self, user_id):
-        """Clear all conversation history for a user."""
-        with self._lock:
-            self._history.pop(user_id, None)
+        """Clear all conversation history for a user in the database."""
+        ChatMessage.objects.filter(user_id=user_id).delete()
 
     def has_history(self, user_id):
-        """Check if user has any conversation history."""
-        with self._lock:
-            return bool(self._history.get(user_id))
+        """Check if user has any conversation history in the database."""
+        return ChatMessage.objects.filter(user_id=user_id).exists()
 
 
 # ================================

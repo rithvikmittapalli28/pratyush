@@ -349,3 +349,23 @@ def clear_chat(request):
     """Clear conversation history for the current user."""
     conversation_manager.clear(request.user.id)
     return Response({"message": "Chat history cleared."})
+
+
+# -------------------------------
+# GET CHAT HISTORY
+# -------------------------------
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_chat_history(request):
+    """Retrieve all persisted chat history messages for the current user."""
+    try:
+        history = conversation_manager.get_history(request.user.id)
+        # Convert to format expected by Chat.js: [{"role": "user"/"assistant", "text": "..."}]
+        formatted = [
+            {"role": msg["role"], "text": msg["content"]}
+            for msg in history
+        ]
+        return Response(formatted)
+    except Exception as exc:
+        logger.error("Error retrieving chat history: %s", exc)
+        return Response({"error": str(exc)}, status=500)

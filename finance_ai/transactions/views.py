@@ -13,7 +13,8 @@ from .models import Transaction, AIInsightLog, Budget, Alert
 from ai_engine.utils import (
     categorize_transaction,
     clean_merchant,
-    generate_ai_insights
+    generate_ai_insights,
+    extract_category
 )
 from ai_engine.analytics import calculate_dashboard
 from .services import get_financial_summary
@@ -78,14 +79,26 @@ def upload_csv(request):
             for row in reader:
                 description = str(row.get("description", "")).strip()
                 amount = float(row["amount"])
-                category = str(row.get("category", "Other") or "Other").strip()
+
+                # Robust date parsing
+                try:
+                    parsed_date = pd.to_datetime(row["date"]).date()
+                except Exception:
+                    parsed_date = timezone.localdate()
+
+                # Robust category normalization
+                raw_cat = str(row.get("category", "") or "").strip()
+                if not raw_cat or raw_cat.lower() == "other" or len(raw_cat) > 20:
+                    category = categorize_transaction(description)
+                else:
+                    category = extract_category(raw_cat)
 
                 Transaction.objects.create(
                     user=request.user,
-                    date=row["date"],
+                    date=parsed_date,
                     merchant=description,
                     amount=amount,
-                    category=category or "Other",
+                    category=category,
                 )
 
         return api_response({"message": "Upload successful"})
