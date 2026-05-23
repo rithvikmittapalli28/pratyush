@@ -86,12 +86,19 @@ def _format_money(value):
         return "Rs 0"
 
 
+def _get_reference_date(user):
+    latest_tx = Transaction.objects.filter(user=user).order_by("-date").first()
+    if latest_tx:
+        return latest_tx.date
+    return timezone.localdate()
+
+
 def _get_monthly_snapshot(user):
-    today = timezone.localdate()
+    ref_date = _get_reference_date(user)
     month_txs = Transaction.objects.filter(
         user=user,
-        date__year=today.year,
-        date__month=today.month,
+        date__year=ref_date.year,
+        date__month=ref_date.month,
     )
     month_expenses = month_txs.filter(amount__lt=0)
 
@@ -105,11 +112,43 @@ def _get_monthly_snapshot(user):
     monthly_spending = sum(monthly_categories.values())
 
     return {
-        "month": today.strftime("%B %Y"),
+        "month": ref_date.strftime("%B %Y"),
         "income": monthly_income,
         "spending": monthly_spending,
         "categories": monthly_categories,
     }
+
+
+def _get_budget_progress_analysis(user, monthly_categories):
+    budgets = Budget.objects.filter(user=user).order_by("category")
+    if not budgets.exists():
+        return "  - No budgets set yet."
+
+    lines = []
+    for budget in budgets:
+        cat = budget.category
+        limit = budget.limit
+
+        # Case-insensitive category match
+        spent = 0
+        for m_cat, m_spent in monthly_categories.items():
+            if str(m_cat).strip().lower() == str(cat).strip().lower():
+                spent = m_spent
+                break
+
+        percent = (spent / limit) * 100 if limit > 0 else 0
+        remaining = limit - spent
+
+        if remaining < 0:
+            status = f"OVER BUDGET by {_format_money(abs(remaining))} ⚠️"
+        else:
+            status = f"{_format_money(remaining)} remaining"
+
+        lines.append(
+            f"  - {cat}: {_format_money(spent)} spent of {_format_money(limit)} budget "
+            f"({percent:.1f}% consumed | {status})"
+        )
+    return "\n".join(lines)
 
 
 def _get_budget_snapshot(user):
@@ -140,6 +179,12 @@ def _format_mapping(mapping, empty_message):
     )
 
 
+def _format_list(lst, empty_message):
+    if not lst:
+        return f"  - {empty_message}"
+    return "\n".join(f"  - {item}" for item in lst)
+
+
 def _format_recent_transactions(transactions):
     if not transactions:
         return "  - No uploaded or manually added transactions yet."
@@ -164,8 +209,12 @@ def _build_system_prompt(user, data):
     total_spent = data.get("total_spent", 0)
     runway = forecast.get("runway_days", 0)
     remaining = forecast.get("remaining_balance", 0)
+    savings_opp = data.get("savings_opportunity", 0)
+    anomalies = data.get("anomalies", [])
+    warnings = data.get("warnings", [])
+
     monthly = _get_monthly_snapshot(user)
-    budgets = _get_budget_snapshot(user)
+    budget_progress = _get_budget_progress_analysis(user, monthly["categories"])
     recent_transactions = _get_recent_transactions(user)
     market_context = get_market_context()
 
@@ -180,22 +229,32 @@ CURRENT USER FINANCIAL DATA:
 - Lifetime uploaded/manual spending: {_format_money(total_spent)}
 - Remaining balance from known transactions: {_format_money(remaining)}
 - Runway (days until funds run out): {runway} days
-- Current month: {monthly["month"]}
-- Current-month income: {_format_money(monthly["income"])}
-- Current-month spending: {_format_money(monthly["spending"])}
-- Current-month spending by category:
+- Active month analysis: {monthly["month"]} (based on the user's latest transaction activity)
+- Income for this month: {_format_money(monthly["income"])}
+- Total spending for this month: {_format_money(monthly["spending"])}
+- Monthly spending by category:
 {_format_mapping(monthly["categories"], "No current-month spending data yet.")}
-- Overall spending by category:
+- Overall lifetime spending by category:
 {_format_mapping(lifetime_categories, "No spending data yet.")}
-- User budgets:
-{_format_mapping(budgets, "No budgets set yet.")}
-- Recent transactions:
+
+BUDGETS & SPENDING TRACKER:
+{budget_progress}
+
+DASHBOARD ALERTS & FINANCIAL INSIGHTS:
+- Potential monthly savings identified: {_format_money(savings_opp)}
+- Spending anomalies detected:
+{_format_list(anomalies, "No spending anomalies detected.")}
+- Financial runway warnings:
+{_format_list(warnings, "No financial health warnings.")}
+
+RECENT TRANSACTIONS:
 {_format_recent_transactions(recent_transactions)}
 
 {market_context}
 
 RESPONSE RULES:
-- Use the real financial data above when relevant. If data is missing, say what is missing and answer generally.
+- Use the real financial data above when relevant. Make direct connections to their category spending, budget limits, runway days, anomalies, and savings opportunities!
+- If the user asks about overspending, budgets, or savings, reference the exact status from the data above.
 - Use INR and "Rs" for currency amounts.
 - Keep simple answers concise; use clear bullets or numbered steps for planning questions.
 - Explain risk levels for investments and crypto. Never guarantee profits or returns.

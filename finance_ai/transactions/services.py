@@ -45,13 +45,60 @@ def get_financial_summary(user):
 
 
 def get_dashboard_data(user):
+    from collections import defaultdict
+    from ai_engine.analytics import calculate_dashboard
+
+    transactions = Transaction.objects.filter(user=user)
+    expenses = [t for t in transactions if t.amount < 0]
     summary = get_financial_summary(user)
+    data = calculate_dashboard(transactions)
+
+    # Compute category totals excluding 'salary' (matching dashboard view exactly)
+    category_totals = defaultdict(float)
+    for tx in expenses:
+        category = tx.category or "Other"
+        if str(category).strip().lower() == "salary":
+            continue
+        category_totals[category] += abs(tx.amount)
+
+    # Compute daily anomalies
+    anomaly_warnings = []
+    category_daily = defaultdict(lambda: defaultdict(float))
+    for tx in expenses:
+        category = tx.category or "Other"
+        category_daily[category][tx.date] += abs(tx.amount)
+
+    for category, daily_data in category_daily.items():
+        dates = sorted(daily_data.keys())
+        if len(dates) < 3:
+            continue
+        values = [daily_data[day] for day in dates]
+        avg_spend = sum(values[:-1]) / (len(values) - 1)
+        current_spend = values[-1]
+        if avg_spend > 0 and current_spend > avg_spend * 1.3:
+            percent = ((current_spend - avg_spend) / avg_spend) * 100
+            anomaly_warnings.append(
+                f"{category} spending increased by {round(percent)}% compared to recent average"
+            )
+
+    # Compile warnings exactly like the warning engine does
+    from transactions.views import generate_warnings
+    dashboard_data = {
+        "forecast": {
+            "runway_days": summary["runway_days"],
+        },
+        "anomaly_warnings": anomaly_warnings,
+    }
+    warnings = generate_warnings(dashboard_data)
 
     return {
         "total_spent": summary["total_spent"],
-        "category_breakdown": summary["category"],
+        "category_breakdown": dict(category_totals),
         "forecast": {
             "remaining_balance": summary["remaining_balance"],
             "runway_days": summary["runway_days"],
         },
+        "savings_opportunity": data.get("savings_opportunity", 0),
+        "anomalies": anomaly_warnings,
+        "warnings": warnings,
     }

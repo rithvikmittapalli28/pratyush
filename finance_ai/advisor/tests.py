@@ -60,10 +60,10 @@ class CAChatTests(APITestCase):
         system_prompt = messages[0]["content"]
         self.assertEqual(messages[0]["role"], "system")
         self.assertIn("Do not use keyword routing or canned answers", system_prompt)
-        self.assertIn("Current-month spending: Rs 12,500", system_prompt)
+        self.assertIn("Total spending for this month: Rs 12,500", system_prompt)
         self.assertIn("Food: Rs 8,000", system_prompt)
         self.assertIn("Entertainment: Rs 4,500", system_prompt)
-        self.assertIn("Food: Rs 7,000", system_prompt)
+        self.assertIn("Rs 7,000 budget", system_prompt)
         self.assertIn("MARKET CONTEXT TEST", system_prompt)
         self.assertEqual(messages[-1]["role"], "user")
         self.assertEqual(
