@@ -19,3 +19,8 @@ A Django-based finance assistant for budgeting, forecasting, and personalized in
    python manage.py runserver
    ```
 
+## Notes
+
+- This repository includes Django apps for advisor, AI engine, and transactions.
+- Developed by Pratyush.
+
