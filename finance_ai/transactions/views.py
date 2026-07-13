@@ -125,7 +125,18 @@ def add_transaction(request):
             return api_response({"error": "Invalid date format"}, status=400)
         date = date.date()
 
-        category = categorize_transaction(merchant)
+        # Read and normalize category if provided, otherwise classify
+        req_category = request.data.get('category')
+        if req_category and str(req_category).strip():
+            from ai_engine.utils import ALLOWED_CATEGORIES, extract_category
+            normalized_categories = {c.lower(): c for c in ALLOWED_CATEGORIES}
+            cat_lower = str(req_category).strip().lower()
+            if cat_lower in normalized_categories:
+                category = normalized_categories[cat_lower]
+            else:
+                category = extract_category(str(req_category))
+        else:
+            category = categorize_transaction(merchant)
 
         tx = Transaction.objects.create(
             user=user,
